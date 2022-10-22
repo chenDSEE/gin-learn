@@ -78,6 +78,7 @@ const (
 // Engine is the framework's instance, it contains the muxer, middleware and configuration settings.
 // Create an instance of Engine, by using New() or Default()
 type Engine struct {
+	// 注意，因为 Engine 采用 embedded 了 RouterGroup 所以自动拥有了 RouterGroup 的所有 method
 	RouterGroup
 
 	// RedirectTrailingSlash enables automatic redirection if the current route can't be matched but a
@@ -145,6 +146,7 @@ type Engine struct {
 	MaxMultipartMemory int64
 
 	// UseH2C enable h2c support.
+	// 默认关闭
 	UseH2C bool
 
 	// ContextWithFallback enable fallback Context.Deadline(), Context.Done(), Context.Err() and Context.Value() when Context.Request.Context() is not nil.
@@ -158,14 +160,16 @@ type Engine struct {
 	allNoMethod      HandlersChain
 	noRoute          HandlersChain
 	noMethod         HandlersChain
-	pool             sync.Pool
-	trees            methodTrees
+	pool             sync.Pool // 装 Context 的，这样就可以减轻写 GC 的压力，服用对象
+	trees            methodTrees // 不同的 http method 会有不同的路由树
 	maxParams        uint16
 	maxSections      uint16
 	trustedProxies   []string
 	trustedCIDRs     []*net.IPNet
 }
 
+// Q&A: 为什么 Engine 要实现 IRouter interface 呢？
+// 实际上因为 Engine 直接 embedded 了 RouterGroup， 所以满足这个 interface 完全不是问题
 var _ IRouter = &Engine{}
 
 // New returns a new blank Engine instance without any middleware attached.
@@ -203,12 +207,14 @@ func New() *Engine {
 	}
 	engine.RouterGroup.engine = engine
 	engine.pool.New = func() any {
+		// gin 自己封装了一下 Context 的创建，因为还有些 gin 必备的字段需要封进去
 		return engine.allocateContext()
 	}
 	return engine
 }
 
 // Default returns an Engine instance with the Logger and Recovery middleware already attached.
+// 采用 gin 的默认配置生成一个 gin.Engine instance
 func Default() *Engine {
 	debugPrintWARNINGDefault()
 	engine := New()
@@ -218,6 +224,8 @@ func Default() *Engine {
 
 func (engine *Engine) Handler() http.Handler {
 	if !engine.UseH2C {
+		// 默认关闭，所以是走这里的
+		// 因为 gin.Engine 拥有 ServeHTTP() method，所以可以作为注入标准库的 http.Handler
 		return engine
 	}
 
@@ -379,6 +387,12 @@ func (engine *Engine) Run(addr ...string) (err error) {
 
 	address := resolveAddress(addr)
 	debugPrint("Listening and serving HTTP on %s\n", address)
+	// 平淡无奇的利用标注库 ListenAndServe 开始监听
+	// 但是，实际上利用了 engine.Handler() 注入了 gin 自己的路由组件
+	// 默认情况下采用 gin.Engine.ServeHTTP() 作为路由分发，实际上因为
+	// http.ListenAndServe() 填入了 Handler，而且不是使用标准库体统的 mux
+	// 所以 http package 仅仅是帮我们完成 TCP 链接，基础的 HTTP 设置，以及 goroutine 启动
+	// 实际的路由分发，是由 gin.Engine.ServeHTTP() 负责的
 	err = http.ListenAndServe(address, engine.Handler())
 	return
 }
@@ -562,9 +576,14 @@ func (engine *Engine) RunListener(listener net.Listener) (err error) {
 	return
 }
 
+// 实际上这个函数，是并发的运行在多个 goroutine 上的
+// 这也就意味着，gin.Engine 里面的资源是会被并发访问的
 // ServeHTTP conforms to the http.Handler interface.
 func (engine *Engine) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	c := engine.pool.Get().(*Context)
+
+	// w, req 两个参数都装进 gin.Context 里面
+	// 后续只传递 gin.Context 就完事了
 	c.writermem.reset(w)
 	c.Request = req
 	c.reset()
@@ -586,7 +605,10 @@ func (engine *Engine) HandleContext(c *Context) {
 }
 
 func (engine *Engine) handleHTTPRequest(c *Context) {
+	/* http method */
 	httpMethod := c.Request.Method
+
+	/* 整理 URL */
 	rPath := c.Request.URL.Path
 	unescape := false
 	if engine.UseRawPath && len(c.Request.URL.RawPath) > 0 {
@@ -598,10 +620,14 @@ func (engine *Engine) handleHTTPRequest(c *Context) {
 		rPath = cleanPath(rPath)
 	}
 
+	/* 根据相应的 http method 进行 URL 路由匹配 */
 	// Find root of the tree for the given HTTP method
 	t := engine.trees
 	for i, tl := 0, len(t); i < tl; i++ {
 		if t[i].method != httpMethod {
+			// Q&A(DONE): 为什么是 slice 遍历？
+			// 因为在 size 比较小的情况下，slice 的 access 速度比 map 快了一个数量级
+			// 所以即便是时间复杂度为 O(n) 的 slice 遍历，工程上也是比时间复杂度为 O(1) 的 map 更快的
 			continue
 		}
 		root := t[i].root
@@ -611,11 +637,12 @@ func (engine *Engine) handleHTTPRequest(c *Context) {
 			c.Params = *value.params
 		}
 		if value.handlers != nil {
+			// 成功找到 node，且这个 node 是有注册
 			c.handlers = value.handlers
 			c.fullPath = value.fullPath
-			c.Next()
+			c.Next() // 开始把所有注册在这个 route node 上面的 handler 都调用一次
 			c.writermem.WriteHeaderNow()
-			return
+			return // 本次 http request 完事
 		}
 		if httpMethod != http.MethodConnect && rPath != "/" {
 			if value.tsr && engine.RedirectTrailingSlash {

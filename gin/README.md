@@ -15,6 +15,8 @@
 Gin is a web framework written in Go (Golang). It features a martini-like API with performance that is up to 40 times faster thanks to [httprouter](https://github.com/julienschmidt/httprouter). If you need performance and good productivity, you will love Gin.
 
 
+
+
 ## Contents
 
 - [Gin Web Framework](#gin-web-framework)
@@ -182,7 +184,7 @@ Gin uses a custom version of [HttpRouter](https://github.com/julienschmidt/httpr
 
 ## Gin v1. stable
 
-- [x] Zero allocation router.
+- [x] Zero allocation router.(==TODO: 怎么做到的？分析一下==)
 - [x] Still the fastest http router and framework. From routing to writing.
 - [x] Complete suite of unit tests.
 - [x] Battle tested.
@@ -669,12 +671,15 @@ Gin uses [**go-playground/validator/v10**](https://github.com/go-playground/vali
 Note that you need to set the corresponding binding tag on all fields you want to bind. For example, when binding from JSON, set `json:"fieldname"`.
 
 Also, Gin provides two sets of methods for binding:
+
+（Must bind 倾向于让 gin 一站式接管所有行为；而 Should bind 则是 gin 提供给使用者更灵活的操作方式，使用者可以自己写出想要的异常处理方案，就是比较麻烦而已）
+
 - **Type** - Must bind
   - **Methods** - `Bind`, `BindJSON`, `BindXML`, `BindQuery`, `BindYAML`, `BindHeader`, `BindTOML`
   - **Behavior** - These methods use `MustBindWith` under the hood. If there is a binding error, the request is aborted with `c.AbortWithError(400, err).SetType(ErrorTypeBind)`. This sets the response status code to 400 and the `Content-Type` header is set to `text/plain; charset=utf-8`. Note that if you try to set the response code after this, it will result in a warning `[GIN-debug] [WARNING] Headers were already written. Wanted to override status code 400 with 422`. If you wish to have greater control over the behavior, consider using the `ShouldBind` equivalent method.
 - **Type** - Should bind
   - **Methods** - `ShouldBind`, `ShouldBindJSON`, `ShouldBindXML`, `ShouldBindQuery`, `ShouldBindYAML`, `ShouldBindHeader`, `ShouldBindTOML`,
-  - **Behavior** - These methods use `ShouldBindWith` under the hood. If there is a binding error, the error is returned and it is the developer's responsibility to handle the request and error appropriately.
+  - **Behavior** - These methods use `ShouldBindWith` under the hood. If there is a binding error, the error is returned and it is the developer's responsibility to handle the request and error appropriately.（既然使用了更底层的 should bind，那自然是所有错误、异常都需要使用者自己进行处理，没有处理好属于使用者的责任，使用这些底层 API 其实也就需要使用者对 gin 拥有更深入的理解）
 
 When using the Bind-method, Gin tries to infer the binder depending on the Content-Type header. If you are sure what you are binding, you can use `MustBindWith` or `ShouldBindWith`.
 

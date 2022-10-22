@@ -48,6 +48,14 @@ const abortIndex int8 = math.MaxInt8 >> 1
 
 // Context is the most important part of gin. It allows us to pass variables between middleware,
 // manage the flow, validate the JSON of a request and render a JSON response for example.
+// gin.Context struct 为了让 gin 框架在传参更方便，而进行的进一步封装，向上能够兼容标准库的 Context；
+// 向下能够为 gin 框架内部的编程、传参提供便利
+//
+// 1. 兼容标准库中的 Context
+// 2. 标准库中采用 public function 的方式来不停为 Context 进行叠加封装
+// 综合 1 + 2，所以不同的使用者可以很方便的创建自己的 Context struct，并且跟其他人库的 Context 混合使用
+// 因为对 Context 的解、叠加，都是通过标准库的 public function 进行的，而且标准库的 public function 的参数都是
+// Context interface，所以标准库、自己的 Context、其他库的 Context 是可以进行混合使用的，很强大吧
 type Context struct {
 	writermem responseWriter
 	Request   *http.Request
@@ -1156,6 +1164,23 @@ func (c *Context) SetAccepted(formats ...string) {
 /***** GOLANG.ORG/X/NET/CONTEXT *****/
 /************************************/
 
+// 因为 gin.Context 是完全独立的，完全没有碰 http package 里面创建的 Context
+// 1. 向 Context 的常规用法靠拢：(下面的代码就是)这里 Value、Done、Deadline 遍历的找到的时候，
+//    最终还要去 http package 里面的那个 Context 查找一下
+//    1.1 正因为 gin 不会重复提供标准库里面的 WithValue、WithCancel 等 Context 封装操作，所以下面的 interface 基本都是直接向上转发
+//    1.2 宏观一点看，gin.Context 实际上是在 Context 树中，插入了一层架空层，
+//        下面的标准 Context 操作，gin.Context 帮忙向上转发；
+//        上面的标准 Context 操作，gin.Context 也是帮忙向下转发
+//        而 gin.Context 在 gin 框架内部则是自己干自己的事，不干扰其他 Context 的正常干活
+//    1.3 为什么能做到不干扰？因为对外，或者说面对标准库 API 的时候，gin.Context 是采用标准库的 context.Context interface 登场
+//        到了实际 Value、Deadline、Done 的时候，实际上是多态的跑到下面几个函数的，那么我在下面几个函数做好转发，
+//        就可以完美兼容标准库 Context 的用法了。
+//       甚至中间加插了其他第三方库的 Context 也没关系。但实际上，因为 gin 跟 http 紧密结合，并没有任何可以干预的地方，
+//       所以 gin.Context 直接跟 http 的 Context 转发就好
+//
+// 2. 为 gin 包裹的 Context 用法：（上面的代码）主要是为了整个 gin 框架提供更好的参数传递方法，
+//    并为这些参数封装更为方便的函数（因为是标准库的 context 中没有的用法，所以不需要顾虑 http 中创建的 Context）
+
 // Deadline returns that there is no deadline (ok==false) when c.Request has no Context.
 func (c *Context) Deadline() (deadline time.Time, ok bool) {
 	if !c.engine.ContextWithFallback || c.Request == nil || c.Request.Context() == nil {
@@ -1198,5 +1223,6 @@ func (c *Context) Value(key any) any {
 	if !c.engine.ContextWithFallback || c.Request == nil || c.Request.Context() == nil {
 		return nil
 	}
+
 	return c.Request.Context().Value(key)
 }

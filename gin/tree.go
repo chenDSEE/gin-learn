@@ -415,6 +415,9 @@ type skippedNode struct {
 // If no handle can be found, a TSR (trailing slash redirect) recommendation is
 // made if a handle exists with an extra (without the) trailing slash for the
 // given path.
+// 返回的是变量，而不是指针，也是通过 COW 的方式确保并发安全
+// 这种 COW 的方式虽然是浪费了一点点的 CPU，但是他省去了读写锁（毕竟读写锁，即便是读锁，也是有性能消耗的）
+// 真想极致无锁体验，那就学 Linux 内核那用，采用 RCU 来管理路由表
 func (n *node) getValue(path string, params *Params, skippedNodes *[]skippedNode, unescape bool) (value nodeValue) {
 	var globalParamsCount int16
 

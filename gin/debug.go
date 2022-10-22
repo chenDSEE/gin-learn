@@ -66,11 +66,13 @@ func getMinVer(v string) (uint64, error) {
 }
 
 func debugPrintWARNINGDefault() {
+	// 动态检查此时使用的 go 版本（runtime.Version()）
 	if v, e := getMinVer(runtime.Version()); e == nil && v <= ginSupportMinGoVer {
 		debugPrint(`[WARNING] Now Gin requires Go 1.14+.
 
 `)
 	}
+	// 之所以要用这么丑的换行方式，是因为 debugPrint 自动检测，并追加换行，这是为了绕过 debugPrint() 的换行问题
 	debugPrint(`[WARNING] Creating an Engine instance with the Logger and Recovery middleware already attached.
 
 `)

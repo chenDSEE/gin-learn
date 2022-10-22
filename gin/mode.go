@@ -37,6 +37,8 @@ const (
 // To support coloring in Windows use:
 // 		import "github.com/mattn/go-colorable"
 // 		gin.DefaultWriter = colorable.NewColorableStdout()
+// 想要更改 gin 的日志输出方向，直接更改 DefaultWriter 就好了
+// 甚至是通过 gin.DefaultWriter = io.MultiWriter(f, os.Stdout) 的方式设置多输出方向
 var DefaultWriter io.Writer = os.Stdout
 
 // DefaultErrorWriter is the default io.Writer used by Gin to debug errors
