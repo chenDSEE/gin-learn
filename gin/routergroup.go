@@ -51,9 +51,11 @@ type IRoutes interface {
 
 // RouterGroup is used internally to configure router, a RouterGroup is associated with
 // a prefix and an array of handlers (middleware).
+// Q&A(DONE): 为什么 RouterGroup 要指向 Engine，而不直接指向 Engine.tree ?
+// RouterGroup 是与 HTTP method 无关的
 type RouterGroup struct {
 	Handlers HandlersChain
-	basePath string
+	basePath string // 这一整个 group route 的前缀
 	engine   *Engine
 	root     bool
 }
@@ -83,9 +85,9 @@ func (group *RouterGroup) BasePath() string {
 }
 
 func (group *RouterGroup) handle(httpMethod, relativePath string, handlers HandlersChain) IRoutes {
-	absolutePath := group.calculateAbsolutePath(relativePath)
-	handlers = group.combineHandlers(handlers)
-	group.engine.addRoute(httpMethod, absolutePath, handlers)
+	absolutePath := group.calculateAbsolutePath(relativePath) // 拼出绝对路径
+	handlers = group.combineHandlers(handlers) // Q&A: 看 middle ware
+	group.engine.addRoute(httpMethod, absolutePath, handlers) // 从 RouterGroup 中生成 URL 地址后，把这个绝对地址放入 engine.tree 中
 	return group.returnObj()
 }
 
@@ -240,6 +242,8 @@ func (group *RouterGroup) calculateAbsolutePath(relativePath string) string {
 	return joinPaths(group.basePath, relativePath)
 }
 
+// 支持链式调用，所以才这么返回
+// 其实吧，这个 if group.root 的判断其实是有点多余的，因为此时 group = group.engine
 func (group *RouterGroup) returnObj() IRoutes {
 	if group.root {
 		return group.engine

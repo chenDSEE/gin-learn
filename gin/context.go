@@ -177,6 +177,10 @@ func (c *Context) FullPath() string {
 // See example in GitHub.
 func (c *Context) Next() {
 	c.index++
+	// 由框架完成 HandlersChain 的调用是更好的，
+	// 这样就不需要 middle ware 的作者自己手动调用 c.Next()
+	// 但美中不足的是，这种方案不能做到 wrap 的效果
+	// 真要这个 handler wrap handler 效果的话，则需要使用者自己 wrap 一下
 	for c.index < int8(len(c.handlers)) {
 		c.handlers[c.index](c)
 		c.index++

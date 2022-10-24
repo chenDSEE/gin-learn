@@ -6,6 +6,7 @@ package gin
 
 import (
 	"bytes"
+	"fmt"
 	"net/url"
 	"strings"
 	"unicode"
@@ -84,6 +85,15 @@ func longestCommonPrefix(a, b string) int {
 // addChild will add a child node, keeping wildcardChild at the end
 func (n *node) addChild(child *node) {
 	if n.wildChild && len(n.children) > 0 {
+		// n.wildChild 就意味着当前的 node 有一个（最多也只有一个） wildcard 类型的 child node
+		// 这个 node 总是排在最末尾
+		// Q&A(DONE): 为什么 wildcard child 总是要在最末尾？
+		// 因为 n.indices 没法子表达 wildcard 呀
+		// 这其实是要解决静态路由跟动态路由的冲突问题，优先匹配静态路由
+		// 实在不行才匹配动态路由
+		// 不做这个处理的话，下面两个实际上是会发生冲突的：
+		// GET /user/:id
+		// GET /user/:id/post
 		wildcardChild := n.children[len(n.children)-1]
 		n.children = append(n.children[:len(n.children)-1], child, wildcardChild)
 	} else {
@@ -104,6 +114,12 @@ func countSections(path string) uint16 {
 	return uint16(bytes.Count(s, strSlash))
 }
 
+// Q&A: 这三种不同的 nodeType 有什么区别？
+// 0 就意味着普通节点（默认情况）
+// root 就是根节点
+// param 则是 :param 的节点, 而且这个节点是不会混着其他 path 字符串的
+//      （便于后续 param 的解析），同时 node 的 wildcard 也是被置位的
+// catchAll 通用匹配，匹配任意参数(*user), 同时 node 的 wildcard 也是被置位的
 type nodeType uint8
 
 const (
@@ -112,20 +128,31 @@ const (
 	catchAll
 )
 
+// param, catchAll 这两种 type 的 node，wildChild 都是被设置为 true 的
 type node struct {
-	path      string
+	path      string // 自己这个 node 节点的部分 path
+	// Q&A(DONE): indices 有什么用？
+	// wildChild=true，参数节点时，indices=""
+	// indices 实际上是记录了当前 node 所有 childNode.path[0]
+	// 这样就可以加速 next node 的搜索
+	// 而且这不是加入顺序的，是按照可能性来进行排序的
+	// 当有更多的 URL 会路过这个 node 的时候，这些分支就会拍的更前面
 	indices   string
-	wildChild bool
+	wildChild bool // wildcard child node 总是排在 children 的最末尾
 	nType     nodeType
-	priority  uint32
-	children  []*node // child nodes, at most 1 :param style node at the end of the array
+	priority  uint32  // 记录有多少的 URL 会途径这个 node
+
+	// child nodes, at most 1 :param style node at the end of the array
+	// 最多只会有一个 wildcard child，而且这个 node 总是在 children 的最末尾
+	children  []*node
 	handlers  HandlersChain
-	fullPath  string
+	fullPath  string // 完整的路径，从 root 到当前节点
 }
 
 // Increments priority of the given child and reorders if necessary
+// 通过影响 indices，将更多 URL 经过的 node 放在前面
 func (n *node) incrementChildPrio(pos int) int {
-	cs := n.children
+	cs := n.children // cs stand for 'child s'
 	cs[pos].priority++
 	prio := cs[pos].priority
 
@@ -147,12 +174,15 @@ func (n *node) incrementChildPrio(pos int) int {
 }
 
 // addRoute adds a node with the given handle to the path.
-// Not concurrency-safe!
+// Not concurrency-safe! 因为要注入 handlers 的缘故，也没有并发的必要了
+// 也正是因为不支持热加载，所以是没有 delRoute() 的
 func (n *node) addRoute(path string, handlers HandlersChain) {
 	fullPath := path
 	n.priority++
 
 	// Empty tree
+	// len(n.path) == 0 意味着当前 node 重来没有被填充过（是个新的 node）
+	// len(n.children) == 0 意味着这个 node 也没有 children
 	if len(n.path) == 0 && len(n.children) == 0 {
 		n.insertChild(path, fullPath, handlers)
 		n.nType = root
@@ -161,18 +191,32 @@ func (n *node) addRoute(path string, handlers HandlersChain) {
 
 	parentFullPathIndex := 0
 
+	// 循环解析：
+	// 1. 在循环的过程中，path 在不断的缩短（已经存在 tree node 中的字符，将会被不停删除）
+	// 2. 在循环的过程中，n 不断指向这一轮需要检查的节点，实际上是在 tree 中从根节点不断向下
 walk:
 	for {
 		// Find the longest common prefix.
 		// This also implies that the common prefix contains no ':' or '*'
 		// since the existing key can't contain those chars.
-		i := longestCommonPrefix(path, n.path)
+		i := longestCommonPrefix(path, n.path) // 剩下的 path 有多少个当前节点时相同的？
 
+		/* 节点分裂, 分裂完之后还是要走检查下一个 if-branch */
 		// Split edge
 		if i < len(n.path) {
+			// 当前节点有一部分 n.path 跟 path 是重合的
+			// 那么当前节点就需要一分为二：
+			// 1. 相同的部分继续是 parent node；（n.path[:i]）
+			// 2. 剩下的变成新的 child (n.path[i:])
+			// 3. 而 path[i:] 也是一个节点
+			//    3.1 继续匹配其他的 children node
+			//    3.2 自己门户，创建一个新的 children node
+
+			// 上面的第 2 点：n.path[i:] 后面的独立为一个新的节点
 			child := node{
 				path:      n.path[i:],
 				wildChild: n.wildChild,
+				// 因为原本的 child 全部跟着这个新的 node 走，所以全部 child 相关的都挂在这个 node 下面
 				indices:   n.indices,
 				children:  n.children,
 				handlers:  n.handlers,
@@ -180,40 +224,59 @@ walk:
 				fullPath:  n.fullPath,
 			}
 
+			// 上面的第 1 点：n.path[:i] 继续为本节点
 			n.children = []*node{&child}
 			// []byte for proper unicode char conversion, see #65
+			// n.indices 记录了 child node 的 path[0], 所谓一个快速匹配的方法
 			n.indices = bytesconv.BytesToString([]byte{n.path[i]})
-			n.path = path[:i]
-			n.handlers = nil
+			n.path = path[:i] // 将已经分裂出去的部分，去掉
+			n.handlers = nil  // 现在当前节点只可能是一个中转站，所以是不可能有 handler 的，handler 全部给上面的节点
 			n.wildChild = false
 			n.fullPath = fullPath[:parentFullPathIndex+i]
 		}
+		/*
+		else { i > len(n.path); i == len(n.path)
+			1. i > len(n.path) 显然是直接路过这个 node，不对当前 node 做任何动作
+			2. i == len(n.path) 同样也可能是路过这个 node，不对当前 node 造成任何影响
+		}
+		*/
 
 		// Make new node a child of this node
-		if i < len(path) {
-			path = path[i:]
+		// case1: path 还有部分 path 没有落实\扫描到具体的 node 上，还需要继续进行遍历
+		// case2: 没有 node 可以继续遍历了，剩下的 path 需要自立门户，自己独立成为一个 node
+		if i < len(path) { // 3.1 继续匹配其他的 children node
+			path = path[i:] // 前面的 path[:i] 已经落实到具体节点了，可以删除
 			c := path[0]
 
 			// '/' after param
+			// 当 node 是 param node 的时候，node.indices 就是 ""，所以只能手动补充为这个 node 进行搜索
 			if n.nType == param && c == '/' && len(n.children) == 1 {
 				parentFullPathIndex += len(n.path)
-				n = n.children[0]
+				n = n.children[0] // 下一轮遍历
 				n.priority++
 				continue walk
 			}
 
 			// Check if a child with the next path byte exists
+			// 通过遍历的方式找出下一个 node
 			for i, max := 0, len(n.indices); i < max; i++ {
 				if c == n.indices[i] {
+					// 因为 n.indices[i] 实际上是 child 节点的搜索顺序，所以一旦 match 中 indices 那么下一个节点必然是 n.children[i]
+					// 剩下的 path 往 n.children[i] 上面挂载
 					parentFullPathIndex += len(n.path)
-					i = n.incrementChildPrio(i)
-					n = n.children[i]
+					i = n.incrementChildPrio(i) // 调整 indices 的优先级顺序
+					n = n.children[i]  // 下一轮遍历
+
+					// 因为一个字符必然只会出现一次，所以 match 到了就可以退出了
 					continue walk
 				}
 			}
 
+			// 剩下的 path 在已有的 children 里面都找不到，所以只能新建 node
+			// 3.2 自己门户，创建一个新的 children node
 			// Otherwise insert it
 			if c != ':' && c != '*' && n.nType != catchAll {
+				// 普通 node
 				// []byte for proper unicode char conversion, see #65
 				n.indices += bytesconv.BytesToString([]byte{c})
 				child := &node{
@@ -222,7 +285,11 @@ walk:
 				n.addChild(child)
 				n.incrementChildPrio(len(n.indices) - 1)
 				n = child
+				fmt.Println("cds 0 ---> ", child.fullPath)
+
 			} else if n.wildChild {
+				// 因为 gin 只接受一个 wildcard node，所以需要进行检查
+				// 如果要接收多个 wildcard node 的话，就必须采用回溯的匹配方案了
 				// inserting a wildcard node, need to check if it conflicts with the existing wildcard
 				n = n.children[len(n.children)-1]
 				n.priority++
@@ -237,6 +304,7 @@ walk:
 				}
 
 				// Wildcard conflict
+				// wildcard node 将会发生混淆，所以需要直接 panic 告知使用者
 				pathSeg := path
 				if n.nType != catchAll {
 					pathSeg = strings.SplitN(pathSeg, "/", 2)[0]
@@ -249,14 +317,18 @@ walk:
 					"'")
 			}
 
-			n.insertChild(path, fullPath, handlers)
+			// 实际上是给 if c != ':' && c != '*' && n.nType != catchAll 中
+			// 新建的普通 node 加入 handler
+			n.insertChild(path, fullPath, handlers) // 这里只是利用了 n.insertChild() 最后面的三行，填充 handler 罢了，还不如自己手动填
 			return
 		}
 
 		// Otherwise add handle to current node
 		if n.handlers != nil {
+			// 路由重复添加，直接 panic 告知使用者
 			panic("handlers are already registered for path '" + fullPath + "'")
 		}
+
 		n.handlers = handlers
 		n.fullPath = fullPath
 		return
@@ -278,16 +350,26 @@ func findWildcard(path string) (wildcard string, i int, valid bool) {
 		for end, c := range []byte(path[start+1:]) {
 			switch c {
 			case '/':
+				// wildcard 的结尾找到了
 				return path[start : start+1+end], start, valid
 			case ':', '*':
 				valid = false
 			}
 		}
+
+		// wildcard 就是结尾
 		return path[start:], start, valid
 	}
 	return "", -1, false
 }
 
+// 这个函数很有可能已经不用了，至少在 addRoute 里面是很难进来的
+// 如果没有 wildcard 需要进行处理，那就跳到这个函数的最末尾，简单 insert handler 就好
+// If no wildcard was found, simply insert the path and handle
+// 这个函数命名时真的差，这个函数的目的是：
+// 1. 有 wildcard 的话，则额外增加一个 wildcard node（path 还有 wildcard 的话，就不断分裂 node）
+// 2. 没有的话，则直接填 handler 就好了
+// 实际上这是为了应对后面很多个 wildcard 的情况
 func (n *node) insertChild(path string, fullPath string, handlers HandlersChain) {
 	for {
 		// Find prefix until first wildcard
@@ -314,6 +396,7 @@ func (n *node) insertChild(path string, fullPath string, handlers HandlersChain)
 				path = path[i:]
 			}
 
+			// param 类型的 node 是独立的，不会混着其他 path
 			child := &node{
 				nType:    param,
 				path:     wildcard,

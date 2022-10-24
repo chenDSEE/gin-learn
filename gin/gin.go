@@ -77,6 +77,14 @@ const (
 
 // Engine is the framework's instance, it contains the muxer, middleware and configuration settings.
 // Create an instance of Engine, by using New() or Default()
+// Q&A(DONE): 为什么 gin.Engine 有了 RouterGroup 却还要一个 tree 呢？为什么聚合在一起？
+// 1. 因为 RouteGroup 是 route-tree 的一种管理视角，RouteGroup 其实是特指有一个具有相同前缀的 node
+// 2. RouteGroup 是 route-tree 的一种附属，可有可无。处于管理上的方便，所以 `gin.Engine` 才将根路径 `/` 作为一个 RouteGroup
+// 2.1 将相当于，把全部整个 route-tree 是为 `/` 的 RouteGroup
+// 3. 确实，RouteGroup 的出现，是为让使用者能够更好的管理路由而已
+// 4. route-tree 可以没有 RouteGroup，但是 RouteGroup 必然是依附于 route-tree 才有存在意义的
+// 5. 另外，RouteGroup 是 HTTP method 无关的。RouteGroup 仅仅是路径的管理，跟你那个 method 是完全解耦的，
+//    而且，RouteGroup 并不知晓自己这个 RouteGroup 管理下具体有哪些节点，依然是要回归到 route-tree 才能知道
 type Engine struct {
 	// 注意，因为 Engine 采用 embedded 了 RouterGroup 所以自动拥有了 RouterGroup 的所有 method
 	RouterGroup
@@ -205,7 +213,7 @@ func New() *Engine {
 		trustedProxies:         []string{"0.0.0.0/0", "::/0"},
 		trustedCIDRs:           defaultTrustedCIDRs,
 	}
-	engine.RouterGroup.engine = engine
+	engine.RouterGroup.engine = engine // 指向自己
 	engine.pool.New = func() any {
 		// gin 自己封装了一下 Context 的创建，因为还有些 gin 必备的字段需要封进去
 		return engine.allocateContext()
@@ -323,6 +331,11 @@ func (engine *Engine) rebuild405Handlers() {
 	engine.allNoMethod = engine.combineHandlers(engine.noMethod)
 }
 
+// Q&A(DONE): 为什么不需要加锁？
+// 这并不是什么设计上的错误，也不是什么 tricky 的地方。单纯的没有这种动态热加载路由的场景而已。
+// 为什么？很简单，你可以添加路由的 URL 进去，但是你不可能动态给这个路由注册相应的处理函数！
+// 你业务的处理函数怎么可能动态加载进来。也正是因为每次路由的改变，必然代码代码上的改变，
+// 所以路由添加函数根本不需要考虑动态加载、热加载、并发安全的问题。启动完之后，这个路由表必然是 read only 的
 func (engine *Engine) addRoute(method, path string, handlers HandlersChain) {
 	assert1(path[0] == '/', "path must begin with '/'")
 	assert1(method != "", "HTTP method can not be empty")
@@ -332,6 +345,8 @@ func (engine *Engine) addRoute(method, path string, handlers HandlersChain) {
 
 	root := engine.trees.get(method)
 	if root == nil {
+		// lazy create
+		// 这样 lazy 动态加载的话，其实可以减少查路由时的遍历次数
 		root = new(node)
 		root.fullPath = "/"
 		engine.trees = append(engine.trees, methodTree{method: method, root: root})
@@ -638,7 +653,7 @@ func (engine *Engine) handleHTTPRequest(c *Context) {
 		}
 		if value.handlers != nil {
 			// 成功找到 node，且这个 node 是有注册
-			c.handlers = value.handlers
+			c.handlers = value.handlers // 挂上去，然后等到 c.Next() 开始调用
 			c.fullPath = value.fullPath
 			c.Next() // 开始把所有注册在这个 route node 上面的 handler 都调用一次
 			c.writermem.WriteHeaderNow()

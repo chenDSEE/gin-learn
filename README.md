@@ -10,11 +10,7 @@
 
 # gin 的运行概览
 
-// ==TODO:== 补一张内部所有 obj 交互的图
-
-
-
-
+![gin-web-frame](gin_web_framework.svg)
 
 
 
@@ -307,7 +303,51 @@ type Engine struct {
 
 
 
-# `IRouter`, `IRoutes` interface
+
+
+
+
+
+
+
+
+
+
+# 路由部分
+
+// ==TODO:==route 是怎么确保并发安全的？
+
+```go
+func New() *Engine {
+	debugPrintWARNINGNew()
+	engine := &Engine{
+		RouterGroup: RouterGroup{
+			Handlers: nil,
+			basePath: "/",
+			root:     true,
+		},
+    .......
+    trees:                  make(methodTrees, 0, 9),
+    .........    
+}
+    
+var _ IRouter = &RouterGroup{}
+
+// RouterGroup is used internally to configure router, a RouterGroup is associated with
+// a prefix and an array of handlers (middleware).
+type RouterGroup struct {
+	Handlers HandlersChain
+	basePath string
+	engine   *Engine
+	root     bool
+}
+```
+
+
+
+
+
+## `IRouter`, `IRoutes` interface
 
 ```go
 // IRouter defines all router handle interface includes single and group router.
@@ -341,12 +381,35 @@ type IRoutes interface {
 
 
 
+**为什么 RouterGroup 跟 route-tree 要分开？**
+
+- 因为 RouterGroup 是 route-tree 的一种管理视角，RouterGroup 其实是特指有一个具有相同前缀的 node
+- RouterGroup 是 route-tree 的一种附属，可有可无。处于管理上的方便，所以 `gin.Engine` 才将根路径 `/` 作为一个 RouterGroup
+  - 将相当于，把全部整个 route-tree 是为 `/` 的 RouterGroup
+- 确实，RouterGroup 的出现，是为让使用者能够更好的管理路由而已。简化路径设置
+- route-tree 可以没有 RouterGroup，但是 RouteGroup 必然是依附于 route-tree 才有存在意义的
+- 另外，RouterGroup 是 HTTP method 无关的。RouterGroup 仅仅是路径的管理，跟你那个 method 是完全解耦的，而且，RouteGroup 并不知晓自己这个 RouterGroup 管理下具体有哪些节点，依然是要回归到 route-tree 才能知道
+- 
 
 
 
-// ==TODO:==route 是怎么确保并发安全的？
 
 
+
+
+**为什么路由的添加不需要加锁？**
+
+这并不是什么设计上的错误，也不是什么 tricky 的地方。单纯的没有这种动态热加载路由的场景而已。
+
+为什么？很简单，你可以添加路由的 URL 进去，但是你不可能动态给这个路由注册相应的处理函数！你业务的处理函数怎么可能动态加载进来。也正是因为每次路由的改变，必然代码代码上的改变，所以路由添加函数根本不需要考虑动态加载、热加载、并发安全的问题。启动完之后，这个路由表必然是 read only 的
+
+
+
+**gin 的路由搜索做做了什么优化？**
+
+`node.indices` 作为搜索优先排序，更多 URL 经过的 node 将会被排在前面
+
+`incrementChildPrio()`
 
 
 
